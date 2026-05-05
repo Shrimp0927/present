@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 from rich.console import Console
 
-from present.parser import ImageBox, Settings, Slide, TextBox
+from present.parser import ImageBox, Settings, Slide, TableBlock, TextBox
 from present.renderer import render_slide
 
 
@@ -64,6 +64,211 @@ class TestSingleBoxRender:
         render_slide(screen, slide, slide_index=0, total_slides=1)
         out = _capture(screen.update.call_args[0][0])
         assert "print" in out
+
+
+_ANSI_RE = __import__("re").compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(out: str) -> str:
+    return _ANSI_RE.sub("", out)
+
+
+class TestCodeBlockRender:
+    def test_code_only_box_renders_with_syntax_highlighting(self) -> None:
+        console = Console(file=StringIO(), width=80, height=24, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(
+            boxes=[TextBox(content="```python\ndef hi():\n    return 1\n```")]
+        )
+
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out = _capture(screen.update.call_args[0][0])
+        # The code itself is rendered (after stripping ANSI between tokens).
+        plain = _plain(out)
+        assert "def" in plain and "hi" in plain
+        assert "return" in plain
+        # Syntax highlighting emits truecolor foregrounds — `def` should carry one.
+        assert "\x1b[38;2;" in out
+
+    def test_code_block_after_bullets_appears_after_them(self) -> None:
+        console = Console(file=StringIO(), width=100, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        md = "- bullet ALPHA\n- bullet BETA\n\n```python\nGAMMA = 1\n```"
+        slide = Slide(boxes=[TextBox(content=md)])
+
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out = _capture(screen.update.call_args[0][0])
+
+        import re
+
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        plain_lines = [ansi.sub("", ln) for ln in out.splitlines()]
+        alpha_row = next(i for i, ln in enumerate(plain_lines) if "ALPHA" in ln)
+        beta_row = next(i for i, ln in enumerate(plain_lines) if "BETA" in ln)
+        gamma_row = next(i for i, ln in enumerate(plain_lines) if "GAMMA" in ln)
+        assert alpha_row < beta_row < gamma_row
+
+    def test_code_block_between_bullets_appears_between(self) -> None:
+        console = Console(file=StringIO(), width=100, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        md = "- bullet ONE\n\n```python\nMID = 0\n```\n\n- bullet TWO"
+        slide = Slide(boxes=[TextBox(content=md)])
+
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out = _capture(screen.update.call_args[0][0])
+
+        import re
+
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        plain = [ansi.sub("", ln) for ln in out.splitlines()]
+        one_row = next(i for i, ln in enumerate(plain) if "ONE" in ln)
+        mid_row = next(i for i, ln in enumerate(plain) if "MID" in ln)
+        two_row = next(i for i, ln in enumerate(plain) if "TWO" in ln)
+        assert one_row < mid_row < two_row
+
+    def test_code_block_language_drives_highlighting(self) -> None:
+        # JavaScript "function" keyword should be highlighted differently
+        # than the same word as plain text. We just assert that ANSI fg colors
+        # appear, indicating Syntax (not plain Text) rendered the block.
+        console = Console(file=StringIO(), width=80, height=24, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(
+            boxes=[TextBox(content="```javascript\nfunction hi() { return 1; }\n```")]
+        )
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out = _capture(screen.update.call_args[0][0])
+        assert "function" in out
+        assert "\x1b[38;2;" in out
+
+    def test_inline_code_snippet_rendered_inline_with_text(self) -> None:
+        # Single-backtick snippets are inline; content must appear on the same
+        # line as surrounding text, not on a separate code-block-style line.
+        console = Console(file=StringIO(), width=80, height=24, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(boxes=[TextBox(content="Use `pathlib.Path` for files.")])
+
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out = _capture(screen.update.call_args[0][0])
+
+        import re
+
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        plain = [ansi.sub("", ln) for ln in out.splitlines()]
+        # The snippet text and surrounding words land on the same row.
+        same_row = next(
+            (ln for ln in plain if "Use" in ln and "pathlib.Path" in ln and "for files" in ln),
+            None,
+        )
+        assert same_row is not None
+
+    def test_code_block_in_two_column_layout(self) -> None:
+        console = Console(file=StringIO(), width=140, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(
+            boxes=[
+                TextBox(content="LEFT_TEXT"),
+                TextBox(content="```python\nRIGHT_CODE = 1\n```"),
+            ]
+        )
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out = _capture(screen.update.call_args[0][0])
+        assert "LEFT_TEXT" in out
+        assert "RIGHT_CODE" in out
+
+
+class TestTableRender:
+    def test_table_only_box_renders_all_entries(self) -> None:
+        console = Console(file=StringIO(), width=80, height=24, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(
+            boxes=[TextBox(content="table 2x2\nALPHA\nBETA\nGAMMA\nDELTA")]
+        )
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        plain = _plain(_capture(screen.update.call_args[0][0]))
+        for entry in ("ALPHA", "BETA", "GAMMA", "DELTA"):
+            assert entry in plain, f"missing entry {entry!r} in output"
+
+    def test_table_entries_rendered_row_major(self) -> None:
+        # Row 0: TOPLEFT TOPRIGHT
+        # Row 1: BOTLEFT BOTRIGHT
+        # First, top row must come above bottom row vertically.
+        # Second, on each row, left column must precede right column horizontally.
+        console = Console(file=StringIO(), width=100, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(
+            boxes=[
+                TextBox(
+                    content="table 2x2\nTOPLEFT\nTOPRIGHT\nBOTLEFT\nBOTRIGHT"
+                )
+            ]
+        )
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out_lines = [_plain(ln) for ln in _capture(screen.update.call_args[0][0]).splitlines()]
+
+        topleft_row = next(i for i, ln in enumerate(out_lines) if "TOPLEFT" in ln)
+        botleft_row = next(i for i, ln in enumerate(out_lines) if "BOTLEFT" in ln)
+        assert topleft_row < botleft_row
+
+        top_row_text = out_lines[topleft_row]
+        assert "TOPRIGHT" in top_row_text
+        assert top_row_text.index("TOPLEFT") < top_row_text.index("TOPRIGHT")
+
+        bot_row_text = out_lines[botleft_row]
+        assert "BOTRIGHT" in bot_row_text
+        assert bot_row_text.index("BOTLEFT") < bot_row_text.index("BOTRIGHT")
+
+    def test_table_between_bullets(self) -> None:
+        md = (
+            "- bullet ABOVE\n\n"
+            "table 1x2\nLCELL\nRCELL\n\n"
+            "- bullet BELOW\n"
+        )
+        console = Console(file=StringIO(), width=100, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(boxes=[TextBox(content=md)])
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out_lines = [_plain(ln) for ln in _capture(screen.update.call_args[0][0]).splitlines()]
+        above = next(i for i, ln in enumerate(out_lines) if "ABOVE" in ln)
+        cell = next(i for i, ln in enumerate(out_lines) if "LCELL" in ln)
+        below = next(i for i, ln in enumerate(out_lines) if "BELOW" in ln)
+        assert above < cell < below
+
+    def test_table_with_three_columns(self) -> None:
+        md = "table 1x3\nA1\nB1\nC1"
+        console = Console(file=StringIO(), width=100, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(boxes=[TextBox(content=md)])
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        out_lines = [_plain(ln) for ln in _capture(screen.update.call_args[0][0]).splitlines()]
+        row = next(ln for ln in out_lines if "A1" in ln and "B1" in ln and "C1" in ln)
+        assert row.index("A1") < row.index("B1") < row.index("C1")
+
+    def test_table_in_two_column_layout(self) -> None:
+        console = Console(file=StringIO(), width=140, height=30, force_terminal=True)
+        screen = _make_screen(console)
+        slide = Slide(
+            boxes=[
+                TextBox(content="LEFT_TEXT_MARKER"),
+                TextBox(content="table 1x2\nXCELL\nYCELL"),
+            ]
+        )
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        plain = _plain(_capture(screen.update.call_args[0][0]))
+        assert "LEFT_TEXT_MARKER" in plain
+        assert "XCELL" in plain and "YCELL" in plain
+
+    def test_directly_constructed_tableblock_renders(self) -> None:
+        # A box built with explicit segments (skipping content parsing) still works.
+        console = Console(file=StringIO(), width=80, height=24, force_terminal=True)
+        screen = _make_screen(console)
+        box = TextBox(
+            content="",
+            segments=[TableBlock(rows=1, cols=2, entries=["XX", "YY"])],
+        )
+        slide = Slide(boxes=[box])
+        render_slide(screen, slide, slide_index=0, total_slides=1)
+        plain = _plain(_capture(screen.update.call_args[0][0]))
+        assert "XX" in plain and "YY" in plain
 
 
 class TestTwoColumnRender:

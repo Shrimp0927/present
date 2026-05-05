@@ -15,11 +15,23 @@ from rich.padding import Padding
 from rich.rule import Rule
 from rich.screen import Screen
 from rich.style import Style
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich_pixels import Pixels
 
-from present.parser import Box, ImageBox, Settings, Slide, TextBox
+from present.parser import (
+    Box,
+    CodeBlock,
+    ImageBox,
+    Segment,
+    Settings,
+    Slide,
+    TableBlock,
+    TextBox,
+)
+
+CODE_THEME = "monokai"
 
 USER_AGENT = "present-cli/0.1 (https://github.com/anthropics/claude-code)"
 
@@ -129,10 +141,60 @@ def _render_box(
     box: Box, width: int, height: int, settings: Settings
 ) -> ConsoleRenderable:
     if isinstance(box, TextBox):
-        scaled = _scale_body(box.content, settings.text_size)
-        md = Markdown(scaled, code_theme="monokai")
-        return md
+        return _render_text_box(box, settings)
     return _render_image(box, width=width, height=height)
+
+
+def _render_text_box(box: TextBox, settings: Settings) -> ConsoleRenderable:
+    parts: list[ConsoleRenderable] = []
+    for segment in box.segments:
+        rendered = _render_segment(segment, settings)
+        if rendered is not None:
+            parts.append(rendered)
+    if len(parts) == 1:
+        return parts[0]
+    return Group(*parts)
+
+
+def _render_segment(
+    segment: Segment, settings: Settings
+) -> ConsoleRenderable | None:
+    if isinstance(segment, CodeBlock):
+        lexer = segment.language or "text"
+        return Syntax(
+            segment.code,
+            lexer,
+            theme=CODE_THEME,
+            background_color="default",
+            word_wrap=True,
+            padding=(0, 1),
+        )
+    if isinstance(segment, TableBlock):
+        return _render_table(segment, settings)
+    text = segment.strip("\n")
+    if not text:
+        return None
+    return Markdown(_scale_body(text, settings.text_size), code_theme=CODE_THEME)
+
+
+def _render_table(table: TableBlock, settings: Settings) -> ConsoleRenderable:
+    border_style = _safe_style(f"dim {settings.text_color}")
+    header_style = _safe_style(f"bold {settings.text_color}")
+    rich_table = Table(
+        show_header=False,
+        show_lines=True,
+        border_style=border_style,
+        header_style=header_style,
+        pad_edge=False,
+    )
+    for _ in range(table.cols):
+        rich_table.add_column(ratio=1, justify="left", overflow="fold")
+
+    for r in range(table.rows):
+        start = r * table.cols
+        row_cells = table.entries[start : start + table.cols]
+        rich_table.add_row(*row_cells)
+    return rich_table
 
 
 def _scale_body(content: str, text_size: int) -> str:

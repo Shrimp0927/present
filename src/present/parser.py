@@ -5,8 +5,29 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class CodeBlock:
+    language: str
+    code: str
+
+
+@dataclass
+class TableBlock:
+    rows: int
+    cols: int
+    entries: list[str]
+
+
+Segment = str | CodeBlock | TableBlock
+
+
+@dataclass
 class TextBox:
     content: str
+    segments: list[Segment] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.segments:
+            self.segments = _split_into_segments(self.content)
 
 
 @dataclass
@@ -41,6 +62,8 @@ SLIDE_SEPARATOR = re.compile(r"^\s*---\s*$")
 COLUMN_SEPARATOR = re.compile(r"^\s*:::\s*$")
 IMAGE_ONLY = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 LEADING_HEADING = re.compile(r"^\s*#{1,6}\s+(.+?)\s*$")
+FENCE_OPEN = re.compile(r"^\s*(```|~~~)\s*([^\s`~]*)\s*$")
+TABLE_DIRECTIVE = re.compile(r"^\s*table\s+(\d+)[xX](\d+)\s*$", re.IGNORECASE)
 
 
 def parse(markdown: str) -> Presentation:
@@ -155,3 +178,64 @@ def _box_from(content: str) -> Box:
         alt, src = match.group(1), match.group(2)
         return ImageBox(src=src, alt=alt)
     return TextBox(content=content)
+
+
+def _split_into_segments(content: str) -> list[Segment]:
+    """Walk the content line by line, peeling fenced code blocks into CodeBlocks.
+
+    Inline backticks are left inside text segments — Markdown renders them as
+    snippets the same way it renders bold/italic.
+    """
+    lines = content.split("\n")
+    segments: list[Segment] = []
+    text_buf: list[str] = []
+    i = 0
+
+    def flush_text() -> None:
+        if not text_buf:
+            return
+        joined = "\n".join(text_buf).strip("\n")
+        if joined:
+            segments.append(joined)
+        text_buf.clear()
+
+    while i < len(lines):
+        open_match = FENCE_OPEN.match(lines[i])
+        if open_match:
+            fence = open_match.group(1)
+            language = open_match.group(2)
+            code_lines: list[str] = []
+            j = i + 1
+            closed = False
+            while j < len(lines):
+                if lines[j].strip() == fence:
+                    closed = True
+                    break
+                code_lines.append(lines[j])
+                j += 1
+
+            if closed:
+                flush_text()
+                segments.append(CodeBlock(language=language, code="\n".join(code_lines)))
+                i = j + 1
+                continue
+
+        table_match = TABLE_DIRECTIVE.match(lines[i])
+        if table_match:
+            rows = int(table_match.group(1))
+            cols = int(table_match.group(2))
+            needed = rows * cols
+            entries = [ln.strip() for ln in lines[i + 1 : i + 1 + needed]]
+            entries.extend([""] * (needed - len(entries)))
+            flush_text()
+            segments.append(TableBlock(rows=rows, cols=cols, entries=entries))
+            i += 1 + needed
+            continue
+
+        text_buf.append(lines[i])
+        i += 1
+
+    flush_text()
+    if not segments:
+        segments.append("")
+    return segments

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from present.parser import (
+    CodeBlock,
     ImageBox,
     Settings,
     Slide,
+    TableBlock,
     TextBox,
     parse,
     parse_slides,
@@ -174,6 +176,172 @@ class TestSlideDataclass:
     def test_slide_exposes_boxes_list(self) -> None:
         slide = Slide(boxes=[TextBox(content="hi")])
         assert slide.boxes[0].content == "hi"  # type: ignore[union-attr]
+
+
+class TestCodeBlockSegments:
+    def test_textbox_without_code_has_one_text_segment(self) -> None:
+        box = parse_slides("Just plain text\n\nmore text")[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert box.segments == ["Just plain text\n\nmore text"]
+
+    def test_fenced_code_block_extracted_as_codeblock_segment(self) -> None:
+        md = "intro line\n\n```python\ndef hi():\n    print('hi')\n```\n\nafter"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert len(box.segments) == 3
+        assert box.segments[0] == "intro line"
+        assert isinstance(box.segments[1], CodeBlock)
+        assert box.segments[1].language == "python"
+        assert box.segments[1].code == "def hi():\n    print('hi')"
+        assert box.segments[2] == "after"
+
+    def test_code_only_box_has_single_codeblock_segment(self) -> None:
+        md = "```python\nprint(1)\n```"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert len(box.segments) == 1
+        assert isinstance(box.segments[0], CodeBlock)
+        assert box.segments[0].language == "python"
+        assert box.segments[0].code == "print(1)"
+
+    def test_inline_backticks_stay_in_text_segment(self) -> None:
+        # Single backticks are inline snippets, not blocks.
+        md = "Use `os.path.join` to combine paths."
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert box.segments == ["Use `os.path.join` to combine paths."]
+
+    def test_tilde_fenced_block_recognized(self) -> None:
+        md = "before\n\n~~~js\nconsole.log(1);\n~~~\n\nafter"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert len(box.segments) == 3
+        assert isinstance(box.segments[1], CodeBlock)
+        assert box.segments[1].language == "js"
+        assert box.segments[1].code == "console.log(1);"
+
+    def test_code_fence_without_language_has_empty_language(self) -> None:
+        md = "```\nplain code\n```"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert isinstance(box.segments[0], CodeBlock)
+        assert box.segments[0].language == ""
+        assert box.segments[0].code == "plain code"
+
+    def test_multiple_code_blocks_in_one_box(self) -> None:
+        md = "- item one\n\n```python\na = 1\n```\n\n- item two\n\n```python\nb = 2\n```"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        # text, code, text, code
+        assert len(box.segments) == 4
+        assert isinstance(box.segments[1], CodeBlock)
+        assert isinstance(box.segments[3], CodeBlock)
+        assert box.segments[1].code == "a = 1"
+        assert box.segments[3].code == "b = 2"
+
+    def test_textbox_content_preserved_alongside_segments(self) -> None:
+        # Raw content should still be available unchanged for callers that want it.
+        md = "before\n\n```py\nx=1\n```\n\nafter"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert "```py" in box.content
+        assert "x=1" in box.content
+
+
+class TestTableBlockSegments:
+    def test_table_only_box_has_single_table_segment(self) -> None:
+        md = "table 2x2\nA\nB\nC\nD"
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        assert len(box.segments) == 1
+        seg = box.segments[0]
+        assert isinstance(seg, TableBlock)
+        assert seg.rows == 2
+        assert seg.cols == 2
+        assert seg.entries == ["A", "B", "C", "D"]
+
+    def test_table_entries_fill_row_major(self) -> None:
+        # 2 rows x 3 cols, row-major: (r0c0, r0c1, r0c2, r1c0, r1c1, r1c2)
+        md = "table 2x3\none\ntwo\nthree\nfour\nfive\nsix"
+        box = parse_slides(md)[0].boxes[0]
+        seg = box.segments[0]
+        assert isinstance(seg, TableBlock)
+        assert seg.rows == 2
+        assert seg.cols == 3
+        assert seg.entries == ["one", "two", "three", "four", "five", "six"]
+
+    def test_table_with_bullets_above_and_below(self) -> None:
+        md = (
+            "- bullet one\n"
+            "- bullet two\n"
+            "\n"
+            "table 2x2\n"
+            "A\n"
+            "B\n"
+            "C\n"
+            "D\n"
+            "\n"
+            "- bullet three\n"
+        )
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        # text, table, text
+        assert len(box.segments) == 3
+        assert isinstance(box.segments[1], TableBlock)
+        assert "bullet one" in box.segments[0]
+        assert "bullet three" in box.segments[2]
+
+    def test_table_directive_case_insensitive(self) -> None:
+        md = "TABLE 1x2\nleft\nright"
+        seg = parse_slides(md)[0].boxes[0].segments[0]
+        assert isinstance(seg, TableBlock)
+        assert seg.rows == 1
+        assert seg.cols == 2
+
+    def test_dimensions_separator_is_x_or_capital_X(self) -> None:
+        md = "table 2X2\nA\nB\nC\nD"
+        seg = parse_slides(md)[0].boxes[0].segments[0]
+        assert isinstance(seg, TableBlock)
+        assert seg.rows == 2 and seg.cols == 2
+
+    def test_1xN_table(self) -> None:
+        md = "table 1x3\na\nb\nc"
+        seg = parse_slides(md)[0].boxes[0].segments[0]
+        assert isinstance(seg, TableBlock)
+        assert seg.entries == ["a", "b", "c"]
+
+    def test_missing_entries_are_padded_with_empty_strings(self) -> None:
+        # Only 2 entries given for a 2x2 table → pad to 4.
+        md = "table 2x2\nA\nB"
+        seg = parse_slides(md)[0].boxes[0].segments[0]
+        assert isinstance(seg, TableBlock)
+        assert seg.entries == ["A", "B", "", ""]
+
+    def test_table_alongside_code_block(self) -> None:
+        md = (
+            "intro\n\n"
+            "table 1x2\nleft\nright\n\n"
+            "```python\nprint(1)\n```\n"
+        )
+        box = parse_slides(md)[0].boxes[0]
+        kinds = [type(s).__name__ if not isinstance(s, str) else "str" for s in box.segments]
+        assert "TableBlock" in kinds
+        assert "CodeBlock" in kinds
+
+    def test_text_that_looks_like_table_directive_without_dimensions_stays_text(self) -> None:
+        # "table" alone is normal text, not a directive.
+        md = "I love tables.\ntable design is fun."
+        box = parse_slides(md)[0].boxes[0]
+        assert isinstance(box, TextBox)
+        # No TableBlock, all stays text.
+        assert all(isinstance(s, str) for s in box.segments)
+
+    def test_table_inside_code_fence_is_not_treated_as_directive(self) -> None:
+        md = "```\ntable 2x2\nA\nB\nC\nD\n```"
+        box = parse_slides(md)[0].boxes[0]
+        # The whole thing is a code block.
+        assert len(box.segments) == 1
+        assert isinstance(box.segments[0], CodeBlock)
 
 
 class TestPresentationFrontmatter:
